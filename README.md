@@ -47,17 +47,18 @@ Internal **room booking** dashboard: browse, create, edit, and delete reservatio
 Login is **Keycloak-only** (no email/password in this app). Flow:
 
 1. User hits a protected route → `middleware.ts` checks for a session cookie; if missing → redirect to `/sign-in`.
-2. User clicks **Continue with Keycloak** → Better Auth starts OAuth2 with `providerId: "keycloak"`.
-3. After Keycloak redirects back, Better Auth creates a session cookie.
-4. Booking **API routes** additionally verify the session server-side (`lib/require-session.ts`).
+2. User clicks **Continue with Keycloak** → client calls Better Auth `signIn.oauth2` (`providerId: "keycloak"`, `disableRedirect: true`), then **`window.location.assign`** to Keycloak (explicit redirect + toast on errors).
+3. After Keycloak redirects back to `/api/auth/oauth2/callback/keycloak`, Better Auth completes the flow and sets the session cookie.
+4. Booking **API routes** verify the session (`lib/require-session.ts`). **`bookedBy`** and **`bookedByEmail`** on each booking are **set only from the session** on create/update (not from the request body).
 
 ### Environment variables (auth)
 
 | Variable | Purpose |
 |----------|---------|
 | `BETTER_AUTH_SECRET` | Encryption/signing; **≥ 32 characters** in production (`openssl rand -base64 32`). |
-| `BETTER_AUTH_URL` | Public base URL of **this** app, no trailing slash (e.g. `http://localhost:3000`). Must match the browser origin users use. |
-| `BETTER_AUTH_TRUSTED_ORIGINS` | Optional; comma-separated extra allowed origins for cookies/CSRF. |
+| `BETTER_AUTH_URL` | Public base URL of **this** app, no trailing slash (e.g. `https://bookings.example.com`). **Must match the address users type in the browser** or OAuth redirect and the sign-in button will fail. |
+| `NEXT_PUBLIC_BETTER_AUTH_URL` | Set to the **same** value as `BETTER_AUTH_URL` for production/custom domains so the client calls `/api/auth` on the correct host (needed after `next build`). |
+| `BETTER_AUTH_TRUSTED_ORIGINS` | Optional; comma-separated extra allowed origins (e.g. `https://www.example.com,https://example.com`) if you use multiple hostnames. Server also trusts origins derived from `BETTER_AUTH_URL` and `NEXT_PUBLIC_BETTER_AUTH_URL`. |
 | `KEYCLOAK_CLIENT_ID` | Keycloak client ID. |
 | `KEYCLOAK_CLIENT_SECRET` | Keycloak client secret (confidential client). |
 | `KEYCLOAK_ISSUER` | Full realm issuer URL, e.g. `https://keycloak.kshrd.app/realms/<realm>`. |
@@ -70,15 +71,24 @@ In the Keycloak admin console, for the client used by this app:
   Example: `http://localhost:3000/api/auth/oauth2/callback/keycloak`
 - **Web origins:** your app origin (e.g. `http://localhost:3000`).
 
+### Production / custom domain checklist
+
+1. Set **`BETTER_AUTH_URL`** and **`NEXT_PUBLIC_BETTER_AUTH_URL`** to the **same** public origin (no trailing slash), e.g. `https://bookings.example.com`.
+2. **Rebuild** after changing `NEXT_PUBLIC_*` (`next build` / Docker image rebuild).
+3. Keycloak client: **Valid redirect URIs** and **Web origins** must use that same origin.
+4. Optional: **`BETTER_AUTH_TRUSTED_ORIGINS`** for extra hostnames (e.g. `www` + apex).
+
 ### Important files
 
 | Path | Role |
 |------|------|
 | `lib/auth.ts` | Better Auth server config (SQLite path, Keycloak plugin, `nextCookies()`). |
-| `lib/auth-client.ts` | Browser client + `genericOAuthClient()` plugin. |
+| `lib/auth-public.ts` | `getBetterAuthPublicBaseUrl()`, `buildBetterAuthTrustedOrigins()` — shared URL/origin logic for server + docs. |
+| `lib/auth-client.ts` | Browser client; uses `NEXT_PUBLIC_BETTER_AUTH_URL` + `/api/auth` when set. |
+| `lib/require-session.ts` | `requireApiSession()`, `bookingActorFromSessionUser()` for booking APIs. |
 | `app/api/auth/[...all]/route.ts` | Auth HTTP handler (`toNextJsHandler`). |
 | `middleware.ts` | Redirect unauthenticated users to `/sign-in`. |
-| `app/sign-in/page.tsx` | Keycloak sign-in button. |
+| `app/sign-in/page.tsx` | Keycloak sign-in; manual redirect + error toasts. |
 
 ## API (bookings)
 
@@ -93,7 +103,7 @@ Implementation: `app/api/bookings/**/*.ts`, storage `lib/db.ts`.
 ## Docker
 
 - `docker-compose.yml` maps **`./data`** → `/app/data` so **`bookings.json`** and **`auth.db`** persist.
-- Set the same auth-related env vars at runtime (especially `BETTER_AUTH_URL` to match how users reach the app, e.g. `http://127.0.0.1:9999` if exposed on port 9999).
+- Pass **`BETTER_AUTH_URL`** and **`NEXT_PUBLIC_BETTER_AUTH_URL`** at **build** (for `NEXT_PUBLIC_*`) and/or runtime so they match the URL users use (e.g. public `https://…` behind a reverse proxy, not only `127.0.0.1:9999`).
 - The `Dockerfile` installs build tools for `better-sqlite3` and runs Better Auth migrate after `npm run build`.
 
 ## Scripts
@@ -107,4 +117,5 @@ Implementation: `app/api/bookings/**/*.ts`, storage `lib/db.ts`.
 
 ## Agent / contributor note
 
-For a short architecture and “what to touch” guide for automation, see **`AGENTS.md`**.
+- **`AGENTS.md`** — canonical **agent memory** (files, env, conventions, doc contract).
+- **`.cursor/rules/project-context.mdc`** — always-on Cursor rule pointing here and to env/auth/booking paths.
